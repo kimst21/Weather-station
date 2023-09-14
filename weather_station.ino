@@ -193,7 +193,7 @@ void sendXMLFile(WiFiClient cl){
   cl.print(analogRead(potPin));
   cl.println("</reading>");
 
-  // IMPORTANT: Read the note about GPIO 4 at the pin assignment 
+  // 중요: 핀 과제에서 GPIO 4에 대한 참고 사항을 읽습니다 
   cl.print("<reading>");
   cl.print(analogRead(LDRPin));
   cl.println("</reading>");
@@ -202,14 +202,14 @@ void sendXMLFile(WiFiClient cl){
 }
 
 void readDHT(){
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  //센서 수치가 최대 2초 '오래됨'일 수도 있습니다(센서가 매우 느림)
   humi = dht.readHumidity();
-  // Read temperature as Celsius (the default)
+  // 온도를 섭씨(기본값)로 읽습니다
   tempC = dht.readTemperature();
-  // Read temperature as Fahrenheit (isFahrenheit = true)
+  // 온도를 화씨(화씨 = 참)로 읽습니다
   tempF = dht.readTemperature(true);
 
-  // Check if any reads failed and exit early (to try again).
+  // 실패한 읽기가 있는지 확인하고 일찍 종료(다시 시도)합니다.
   if (isnan(humi) || isnan(tempC) || isnan(tempF)) {
     Serial.println("Failed to read from DHT sensor!");
     return;
