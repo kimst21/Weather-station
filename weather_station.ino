@@ -3,34 +3,32 @@
 #include "SD.h"
 #include "DHT.h"
 #include <Wire.h>
-#include <Adafruit_BMP085.h>
+#include <Adafruit_BME280.h>
 
 // 네트워크 자격 증명으로 대체
-const char* ssid     = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+const char* ssid     = ""; // 공유기 ID입력
+const char* password = ""; // 공유기 비밀번호 입
 
-// 사용 중인 DHT 센서 유형에 대해 아래 행 중 하나의 주석을 제거합니다
-//#define DHTTYPE DHT11   // DHT 11
-//#define DHTTYPE DHT21   // DHT 21 (AM2301)
+// 사용 중인 DHT 센서 유형에 대해 정의
 #define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
 
 // DHT가 연결된 GPIO
-const int DHTPin = 15;
+const int DHTPin = 21;
 //DHT 센서 초기화
 DHT dht(DHTPin, DHTTYPE);
 
-// bmp 개체 만들기
-Adafruit_BMP085 bmp;
+// bme 개체 만들기
+Adafruit_BME280 bme; // I2C
 
 // SD 카드에 저장된 웹 페이지 파일
 File webFile; 
 
-// 전위차계 GPIO 설정
-const int potPin = 32;
+// 트리머 GPIO 설정
+const int potPin = 2;
 
-// 중요: 현재 Wi-Fi 라이브러리를 사용할 때 GPIO 4가 ADC로 작동하지 않습니다
+// 중요: 현재 Wi-Fi 라이브러리를 사용할 때 GPIO 3 ADC로 작동하지 않습니다
 // 이 실드의 제한 사항이지만 다른 GPIO를 사용하여 LDR 판독값을 얻을 수 있습니다
-const int LDRPin = 4;
+const int LDRPin = 3;
 
 // 온도와 습도를 저장할 변수
 float tempC;
@@ -51,8 +49,8 @@ void setup(){
   dht.begin();
 
   // BMP180 센서 초기화
-  if (!bmp.begin()){
-    Serial.println("Could not find BMP180 or BMP085 sensor");
+  if (!bme.begin(0x76)){
+    Serial.println("Could not find BME280 sensor");
     while (1) {}
   }
 
@@ -176,7 +174,7 @@ void sendXMLFile(WiFiClient cl){
   cl.print(humi);
   cl.println("</reading>");
   
-  float currentTemperatureC = bmp.readTemperature();
+  float currentTemperatureC = bme.readTemperature();
   cl.print("<reading>");
   cl.print(currentTemperatureC);
   cl.println("</reading>");
@@ -186,7 +184,7 @@ void sendXMLFile(WiFiClient cl){
   cl.println("</reading>");
   
   cl.print("<reading>");
-  cl.print(bmp.readPressure());
+  cl.print(bme.readPressure());
   cl.println("</reading>");
   
   cl.print("<reading>");
@@ -214,5 +212,4 @@ void readDHT(){
     Serial.println("Failed to read from DHT sensor!");
     return;
   }
-
 }
