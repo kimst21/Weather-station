@@ -25,10 +25,7 @@ File webFile;
 
 // 트리머 GPIO 설정
 const int potPin = 2;
-
-// 중요: 현재 Wi-Fi 라이브러리를 사용할 때 GPIO 3 ADC로 작동하지 않습니다
-// 이 실드의 제한 사항이지만 다른 GPIO를 사용하여 LDR 판독값을 얻을 수 있습니다
-const int LDRPin = 3;
+const int LDRPin = 6;
 
 // 온도와 습도를 저장할 변수
 float tempC;
@@ -48,7 +45,7 @@ void setup(){
   // DHT 센서 초기화
   dht.begin();
 
-  // BMP180 센서 초기화
+  // BME280 센서 초기화
   if (!bme.begin(0x76)){
     Serial.println("Could not find BME280 sensor");
     while (1) {}
