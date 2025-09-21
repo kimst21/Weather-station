@@ -1,393 +1,549 @@
-// ********* 간단한 ESP32 Weather Station - 최종 버전 *********
-// ESP32를 사용한 웹 기반 날씨 모니터링 시스템
-// 기능: BME280 센서로 온도/습도/기압 측정, NeoPixel LED로 시각적 표시, OLED 화면 출력, 웹서버로 원격 모니터링
+# Pico 2 W Weather Station - Below Zero Temperature LED Control Version
+# Pico 2 W 기반의 날씨 측정소 - 영하 온도 감지 LED 제어 기능 포함
 
-#include <WiFi.h>                  // ESP32 WiFi 연결과 웹서버 기능 제공
-#include <Adafruit_BME280.h>        // BME280 온도/습도/기압 센서 제어 라이브러리
-#include <Adafruit_Sensor.h>        // Adafruit 센서들의 통합 인터페이스 제공
-#include <Adafruit_NeoPixel.h>      // WS2812B RGB LED 스트립 제어 라이브러리
-#include <Adafruit_GFX.h>           // Adafruit 그래픽 라이브러리 (OLED 텍스트/그래픽 출력용)
-#include <Adafruit_SSD1306.h>       // SSD1306 OLED 디스플레이 제어 라이브러리
+# ===== 필수 라이브러리 임포트 =====
+import machine  # Pico의 하드웨어 제어를 위한 기본 라이브러리
+import network  # WiFi 네트워크 연결을 위한 라이브러리
+import socket   # 웹서버 구축을 위한 소켓 통신 라이브러리
+import time     # 시간 관련 함수들 (지연, 타이밍 등)
+import neopixel # WS2812B LED 스트립 제어를 위한 라이브러리
+import json     # JSON 데이터 처리를 위한 라이브러리
+from machine import Pin, I2C  # GPIO 핀과 I2C 통신을 위한 클래스들
+import gc       # 가비지 컬렉션(메모리 정리)을 위한 라이브러리
+import random   # 더미 데이터 생성 시 랜덤 값을 위한 라이브러리
 
-// ********* WiFi 설정 (직접 입력) *********
-// 실제 사용할 WiFi 네트워크 정보로 변경 필요
-const char* ssid = "WeVO_2.4G";      // 연결할 WiFi 네트워크 SSID (2.4GHz 대역 권장)
-const char* password = "WEVO8358"; // WiFi 네트워크 비밀번호
+# ===== 외부 센서 라이브러리 가용성 확인 =====
+# BME280과 OLED 라이브러리가 설치되어 있는지 확인하고 가용성 플래그 설정
+BME280_AVAILABLE = False  # BME280 센서 라이브러리 사용 가능 여부
+OLED_AVAILABLE = False    # OLED 디스플레이 라이브러리 사용 가능 여부
 
-// ********* 웹서버 설정 *********
-WiFiServer server(80);             // HTTP 포트 80에서 웹서버 객체 생성 (기본 웹 포트)
+# BME280 온습도 기압 센서 라이브러리 로드 시도
+try:
+    from bme280 import BME280  # BME280 센서 제어 클래스 임포트
+    BME280_AVAILABLE = True    # 성공 시 사용 가능 플래그 설정
+    print(" BME280 library loaded successfully")  # 성공 메시지 출력
+except ImportError:
+    # 라이브러리가 없는 경우 더미 데이터로 동작하도록 설정
+    print(" BME280 library not found")
 
-// ********* BME280 센서 객체 *********
-Adafruit_BME280 bme;              // I2C 통신으로 BME280 센서를 제어할 객체 생성
+# SSD1306 OLED 디스플레이 라이브러리 로드 시도
+try:
+    from ssd1306 import SSD1306_I2C  # OLED 디스플레이 제어 클래스 임포트
+    OLED_AVAILABLE = True            # 성공 시 사용 가능 플래그 설정
+    print(" SSD1306 library loaded successfully")  # 성공 메시지 출력
+except ImportError:
+    # 라이브러리가 없는 경우 OLED 없이 동작하도록 설정
+    print(" SSD1306 library not found")
 
-// ********* OLED 디스플레이 설정 *********
-#define SCREEN_WIDTH 128          // OLED 디스플레이 가로 해상도 (픽셀)
-#define SCREEN_HEIGHT 64          // OLED 디스플레이 세로 해상도 (픽셀)
-#define OLED_RESET    -1          // OLED 리셋 핀 없음 (-1로 설정, 소프트웨어 리셋 사용)
-#define OLED_ADDRESS  0x3C        // OLED I2C 주소 (일반적으로 0x3C, 일부 모듈은 0x3D)
+# ===== 시스템 설정 및 하드웨어 핀 정의 =====
+# Configuration
+WIFI_SSID = "WeVO_2.4G"        # 연결할 WiFi 네트워크 이름 (SSID)
+WIFI_PASSWORD = "Toolbox,WEVO8358+"  # WiFi 네트워크 비밀번호
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET); // OLED 객체 생성 및 I2C 인터페이스 연결
+# I2C 통신 핀 설정 (센서와 OLED 디스플레이 연결용)
+SDA_PIN = 4  # I2C 데이터 라인 핀 번호 (GPIO 4)
+SCL_PIN = 5  # I2C 클럭 라인 핀 번호 (GPIO 5)
 
-// ********* I2C 핀 설정 *********
-// ESP32의 기본 I2C 핀(SDA=21, SCL=22) 대신 커스텀 핀 사용
-#define SDA_PIN 8                 // I2C SDA 핀 (데이터 라인) - GPIO 8번 핀 사용
-#define SCL_PIN 9                 // I2C SCL 핀 (클록 라인) - GPIO 9번 핀 사용
+# LED 스트립 제어 핀 설정
+LED_PIN_1 = 0  # 온도 표시용 LED 스트립 핀 번호 (GPIO 0)
+LED_PIN_2 = 8  # 습도 표시용 LED 스트립 핀 번호 (GPIO 8)
 
-// ********* LED 스트립 설정 *********
-#define LED_PIN_1 4               // 첫 번째 NeoPixel 스트립 데이터 핀 (온도 표시용) - GPIO 4번
-#define LED_PIN_2 17              // 두 번째 NeoPixel 스트립 데이터 핀 (습도 표시용) - GPIO 17번
-#define LED_COUNT 5               // 각 스트립당 LED 개수 (더 많은 LED 사용시 전류 소모량 고려 필요)
-#define BRIGHTNESS 50             // LED 밝기 (0-255, 50은 약 20% 밝기로 전력 절약)
+# LED 관련 설정값
+LED_COUNT = 5        # 각 LED 스트립의 LED 개수 (5개씩)
+LED_BRIGHTNESS = 0.2 # LED 밝기 설정 (0.0~1.0, 20% 밝기)
 
-// NeoPixel 스트립 객체 생성 - NEO_GRB: 색상 순서, NEO_KHZ800: 통신 속도
-Adafruit_NeoPixel strip1(LED_COUNT, LED_PIN_1, NEO_GRB + NEO_KHZ800); // 온도 표시용 스트립
-Adafruit_NeoPixel strip2(LED_COUNT, LED_PIN_2, NEO_GRB + NEO_KHZ800); // 습도 표시용 스트립
+# ===== 전역 변수 선언 =====
+# 센서에서 읽어온 환경 데이터를 저장할 변수들
+temperature, humidity, pressure = 0.0, 0.0, 0.0  # 온도(°C), 습도(%), 기압(hPa)
 
-// ********* 센서 데이터 변수 *********
-// 센서에서 읽은 값을 저장할 전역 변수들
-float temperature = 0.0;          // 현재 온도 값 저장 (섭씨, BME280에서 직접 섭씨로 출력)
-float humidity = 0.0;             // 현재 습도 값 저장 (상대습도 %)
-float pressure = 0.0;             // 현재 기압 값 저장 (hPa 단위로 변환 후 저장)
+# 센서 읽기 타이밍 제어 변수들
+last_sensor_read = 0     # 마지막 센서 읽기 시간 저장
+SENSOR_INTERVAL = 5000   # 센서 읽기 간격 (5초 = 5000ms)
 
-// ********* 타이머 변수 *********
-// delay() 사용 대신 millis()를 이용한 비블로킹 타이머 구현
-unsigned long previousMillis = 0; // 마지막 센서 읽기 시간 기록 (millis() 값)
-const long interval = 5000;       // 센서 읽기 간격 (5000ms = 5초, 너무 자주 읽으면 센서 수명 단축)
+# 하드웨어 객체들을 저장할 전역 변수들 (초기값 None)
+i2c, bme_sensor, oled, strip1, strip2, wlan = None, None, None, None, None, None
 
-// ********* HTML 웹페이지 (메모리에 저장) *********
-// Raw String Literal 사용으로 HTML 코드를 문자열로 저장
-const char* htmlPage = R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>ESP32 Simple Weather Station</title>
-    <meta charset="UTF-8">        <!-- UTF-8 인코딩으로 한글 지원 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">  <!-- 모바일 반응형 웹 설정 -->
-    <style>
-        /* CSS 스타일 - 모던하고 깔끔한 웹 인터페이스 디자인 */
-        body { 
-            font-family: Arial, sans-serif;     /* 웹 안전 폰트 사용 */
-            text-align: center;                 /* 모든 내용 중앙 정렬 */
-            background-color: #f0f0f0;          /* 연한 회색 배경으로 눈의 피로 감소 */
-            margin: 0;
-            padding: 20px;
-        }
-        .container {
-            max-width: 600px;                   /* 최대 너비 제한으로 가독성 향상 */
-            margin: 0 auto;                     /* 컨테이너 중앙 정렬 */
-            background: white;                  /* 흰색 배경으로 내용 강조 */
-            padding: 20px;
-            border-radius: 10px;                /* 모서리 둥글게 처리 */
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1); /* 그림자 효과로 입체감 */
-        }
-        h1 { 
-            color: #333;
-            margin-bottom: 30px;
-        }
-        .sensor-card {
-            background: #4CAF50;                /* 기본 녹색 배경 */
-            color: white;
-            padding: 15px;
-            margin: 10px;
-            border-radius: 8px;
-            display: inline-block;              /* 카드들을 가로로 배치 */
-            min-width: 150px;
-        }
-        .sensor-value {
-            font-size: 24px;                   /* 센서값을 크게 표시 */
-            font-weight: bold;
-        }
-        .sensor-label {
-            font-size: 14px;
-            margin-top: 5px;
-        }
-        .temp { background: #FF6B35; }         /* 온도 카드 주황색 */
-        .humi { background: #3498DB; }         /* 습도 카드 파란색 */
-        .pres { background: #9B59B6; }         /* 기압 카드 보라색 */
-        .update-time {
-            margin-top: 20px;
-            color: #666;
-        }
-    </style>
-    <script>
-        /* JavaScript - AJAX를 이용한 실시간 데이터 업데이트 */
-        function updateData() {                // 센서 데이터를 서버에서 가져와 화면 업데이트
-            var xhr = new XMLHttpRequest();    // AJAX 요청 객체 생성
-            xhr.open('GET', '/data', true);    // GET 방식으로 '/data' 경로에 비동기 요청
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState == 4 && xhr.status == 200) { // 요청 완료 및 성공 시
-                    var data = xhr.responseText.split(',');      // CSV 형태의 응답을 배열로 분할
-                    // DOM 요소에 센서 값 업데이트
-                    document.getElementById('temp').innerHTML = data[0] + '°C';  // 온도 표시
-                    document.getElementById('humi').innerHTML = data[1] + '%';   // 습도 표시
-                    document.getElementById('pres').innerHTML = data[2] + ' hPa'; // 기압 표시
-                    // 업데이트 시간을 현재 로컬 시간으로 표시
-                    document.getElementById('time').innerHTML = '마지막 업데이트: ' + new Date().toLocaleTimeString();
-                }
-            };
-            xhr.send();                        // 요청 전송
-        }
+# ===== 하드웨어 초기화 함수 =====
+def init_hardware():
+
+    global i2c, bme_sensor, oled, strip1, strip2  # 전역 변수들에 접근
+    
+    print("Initializing hardware...")  # 초기화 시작 메시지
+    
+    # ===== I2C 통신 초기화 =====
+    # I2C는 센서와 OLED 디스플레이와 통신하기 위한 프로토콜
+    try:
+        # I2C 객체 생성: 0번 버스, SDA/SCL 핀 설정, 통신 속도 200kHz
+        i2c = I2C(0, sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=200000)
+        print("I2C initialization complete")  # 초기화 성공 메시지
         
-        window.onload = function() {           // 페이지 로드 완료 시 실행
-            updateData();                      // 페이지 열리자마자 첫 데이터 로드
-            setInterval(updateData, 5000);     // 5초마다 자동 업데이트 (센서 읽기 주기와 동일)
-        };
-    </script>
-</head>
+        # 연결된 I2C 디바이스들의 주소를 스캔하여 출력
+        print("I2C addresses:", [hex(addr) for addr in i2c.scan()])
+    except Exception as e:
+        print("I2C initialization failed:", e)  # 초기화 실패 시 오류 메시지
+        return False  # 실패 시 함수 종료
+    
+    # ===== NeoPixel LED 스트립 초기화 =====
+    # WS2812B LED 스트립 2개를 초기화 (온도용, 습도용)
+    try:
+        # 첫 번째 LED 스트립 (온도 표시용) 초기화
+        strip1 = neopixel.NeoPixel(Pin(LED_PIN_1), LED_COUNT)
+        # 두 번째 LED 스트립 (습도 표시용) 초기화
+        strip2 = neopixel.NeoPixel(Pin(LED_PIN_2), LED_COUNT)
+        
+        # 모든 LED를 꺼서 초기 상태로 설정
+        clear_all_leds()
+        print("NeoPixel initialization complete")  # 초기화 성공 메시지
+    except Exception as e:
+        print("Neopixel initialization failed:", e)  # 초기화 실패 시 오류 메시지
+        strip1, strip2 = None, None  # 실패 시 None으로 설정
+    
+    # ===== BME280 센서 초기화 =====
+    # 온도, 습도, 기압을 측정하는 BME280 센서 초기화
+    if BME280_AVAILABLE:  # BME280 라이브러리가 사용 가능한 경우에만
+        try:
+            # BME280 센서 객체 생성 (I2C 통신 사용)
+            bme_sensor = BME280(i2c=i2c)
+            print("BME280 initialization successful")  # 초기화 성공 메시지
+        except Exception as e:
+            print("BME280 initialization failed:", e)  # 초기화 실패 시 오류 메시지
+            bme_sensor = None  # 실패 시 None으로 설정하여 더미 데이터 사용
+    
+    # ===== OLED 디스플레이 초기화 =====
+    # 128x64 픽셀 OLED 디스플레이 초기화 및 시작 화면 표시
+    if OLED_AVAILABLE:  # OLED 라이브러리가 사용 가능한 경우에만
+        try:
+            # OLED 디스플레이 객체 생성 (128x64 해상도, I2C 통신)
+            oled = SSD1306_I2C(128, 64, i2c)
+            oled.fill(0)  # 화면을 검은색으로 지우기
+            
+            # 시작 화면에 텍스트 표시
+            oled.text("Weather Station", 0, 0)   # 제목 표시
+            oled.text("Initializing...", 0, 20)  # 초기화 중 메시지 표시
+            oled.show()  # 화면에 내용 출력
+            
+            print("OLED initialization successful")  # 초기화 성공 메시지
+        except Exception as e:
+            print("OLED initialization failed:", e)  # 초기화 실패 시 오류 메시지
+            oled = None  # 실패 시 None으로 설정
+    
+    print("Hardware initialization complete")  # 모든 하드웨어 초기화 완료 메시지
+    return True  # 성공적으로 초기화 완료
+
+# ===== WiFi 연결 함수 =====
+def connect_wifi():
+    """
+    WiFi 네트워크에 연결하는 함수
+    최대 15초 동안 연결을 시도하며, 성공/실패 여부를 반환
+    """
+    global wlan  # 전역 WiFi 객체에 접근
+    
+    print("Attempting WiFi connection...")  # WiFi 연결 시도 메시지
+    
+    # WiFi 스테이션 모드로 설정 및 활성화
+    wlan = network.WLAN(network.STA_IF)  # 스테이션 인터페이스 객체 생성
+    wlan.active(True)  # WiFi 인터페이스 활성화
+    
+    # 지정된 SSID와 비밀번호로 연결 시도
+    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+    
+    # 연결 완료까지 최대 15초 대기
+    for _ in range(15):  # 15번 반복 (1초씩 대기)
+        if wlan.isconnected():  # 연결 상태 확인
+            # 연결 성공 시 IP 주소와 함께 성공 메시지 출력
+            print("WiFi connection successful! IP:", wlan.ifconfig()[0])
+            return True  # 연결 성공 반환
+        time.sleep(1)  # 1초 대기
+        print(".", end="")  # 연결 시도 중임을 나타내는 점 출력
+    
+    print("WiFi connection failed!")  # 연결 실패 메시지
+    return False  # 연결 실패 반환
+
+# ===== 센서 데이터 읽기 함수 =====
+def read_sensors():
+    """
+    BME280 센서에서 온도, 습도, 기압 데이터를 읽어오는 함수
+    센서가 없거나 읽기에 실패하면 더미 데이터를 생성
+    """
+    global temperature, humidity, pressure  # 전역 센서 데이터 변수들에 접근
+    
+    # BME280 센서가 사용 가능하고 초기화되어 있는 경우
+    if BME280_AVAILABLE and bme_sensor:
+        try:
+            # ===== BME280에서 실제 센서 값 읽기 =====
+            # 센서 라이브러리마다 다른 방식으로 데이터를 제공하므로 두 가지 방법 시도
+            
+            # 방법 1: values 속성을 통한 문자열 형태 데이터 읽기
+            if hasattr(bme_sensor, 'values'):
+                str_values = bme_sensor.values  # 문자열 형태의 센서 값들
+                
+                # 값들이 리스트나 튜플 형태이고 3개 이상의 요소를 가지는 경우
+                if isinstance(str_values, (list, tuple)) and len(str_values) >= 3:
+                    # 각 문자열에서 숫자와 소수점, 음수 기호만 추출
+                    temp_str = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == '-', str_values[0]))
+                    press_str = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == '-', str_values[1]))
+                    hum_str = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == '-', str_values[2]))
+                    
+                    # 추출된 문자열을 float로 변환 (실패 시 0.0)
+                    temperature = float(temp_str) if temp_str else 0.0
+                    pressure = float(press_str) if press_str else 0.0
+                    humidity = float(hum_str) if hum_str else 0.0
+                    return True  # 성공적으로 데이터 읽기 완료
+            else:
+                # 방법 2: read_compensated_data를 직접 사용하는 방법
+                t, p, h = bme_sensor.read_compensated_data()  # 보정된 센서 데이터 읽기
+                temperature = t        # 온도 (°C)
+                pressure = p / 100     # 기압 (Pa를 hPa로 변환)
+                humidity = h           # 습도 (%)
+                return True  # 성공적으로 데이터 읽기 완료
+                
+        except Exception as e:
+            print("BME280 read error:", e)  # 센서 읽기 오류 메시지 출력
+    
+    # ===== 더미 데이터 생성 =====
+    # 센서가 없거나 읽기에 실패한 경우 테스트용 더미 데이터 생성
+    base_time = time.ticks_ms() / 10000  # 시간 기반 변화량 계산
+    
+    # 온도: -5°C ~ 35°C 범위의 시뮬레이션 데이터 (영하 테스트 포함)
+    temperature = 15.0 + 20 * (0.5 + 0.3 * (base_time % 60) / 60) + random.uniform(-1, 1) - 10
+    
+    # 습도: 40% ~ 85% 범위의 시뮬레이션 데이터
+    humidity = 55.0 + 15 * (0.5 + 0.3 * ((base_time + 25) % 80) / 80) + random.uniform(-2, 2)
+    
+    # 기압: 1003 ~ 1033 hPa 범위의 시뮬레이션 데이터
+    pressure = 1013.0 + 10 * (0.5 + 0.2 * ((base_time + 40) % 100) / 100) + random.uniform(-2, 2)
+    
+    return True  # 더미 데이터 생성 완료
+
+# ===== LED 상태 업데이트 함수 =====
+def update_leds():
+ 
+    # LED 스트립이 초기화되지 않은 경우 함수 종료
+    if not strip1 or not strip2:
+        return
+    
+    # ===== 모든 LED 초기화 =====
+    clear_all_leds()  # 이전 상태를 지우고 모든 LED 끄기
+    
+    # ===== 온도 기반 LED 개수 결정 =====
+    # 온도의 절댓값을 사용하여 LED 개수 결정 (영하온도도 강도로 표시)
+    abs_temp = abs(temperature)  # 온도의 절댓값 계산
+    
+    # 온도 범위별 LED 개수 설정 (5단계)
+    if abs_temp <= 8:
+        temp_leds = 1    # 매우 낮은 온도: LED 1개
+    elif abs_temp <= 16:
+        temp_leds = 2    # 낮은 온도: LED 2개
+    elif abs_temp <= 24:
+        temp_leds = 3    # 보통 온도: LED 3개
+    elif abs_temp <= 32:
+        temp_leds = 4    # 높은 온도: LED 4개
+    else:
+        temp_leds = 5    # 매우 높은 온도: LED 5개 (모두 점등)
+    
+    # ===== 온도 기반 LED 색상 결정 =====
+    # 실제 온도 값(음수 포함)을 사용하여 색상 결정
+    if temperature < 0:
+        color_temp = (255, 255, 255)  # 영하 온도: 흰색 (특별 표시)
+    elif temperature < 20:
+        color_temp = (0, 100, 255)    # 낮은 온도 (0~20°C): 파란색
+    elif temperature < 30:
+        color_temp = (255, 165, 0)    # 보통 온도 (20~30°C): 주황색  
+    else:
+        color_temp = (255, 0, 0)      # 높은 온도 (30°C 이상): 빨간색
+
+    # ===== 온도 LED 설정 적용 =====
+    # strip1에 결정된 개수만큼 온도 색상 LED 점등
+    for i in range(temp_leds):
+        strip1[i] = color_temp  # 각 LED에 온도 색상 설정
+    
+    # ===== 습도 기반 LED 개수 결정 =====
+    # 습도 수준에 따라 LED 개수 결정 (5단계)
+    if humidity <= 20:
+        humi_leds = 1    # 매우 건조 (0~20%): LED 1개
+    elif humidity <= 40:
+        humi_leds = 2    # 건조 (21~40%): LED 2개
+    elif humidity <= 60:
+        humi_leds = 3    # 보통 (41~60%): LED 3개
+    elif humidity <= 80:
+        humi_leds = 4    # 습함 (61~80%): LED 4개
+    else:
+        humi_leds = 5    # 매우 습함 (81~100%): LED 5개 (모두 점등)
+    
+    # ===== 습도 LED 색상 설정 =====
+    color_humi = (0, 150, 255)  # 습도는 항상 파란색으로 표시
+    
+    # ===== 습도 LED 설정 적용 =====
+    # strip2에 결정된 개수만큼 습도 색상 LED 점등
+    for i in range(humi_leds):
+        strip2[i] = color_humi  # 각 LED에 습도 색상 설정
+    
+    # ===== LED 스트립에 변경사항 적용 =====
+    # 메모리에 설정된 LED 색상을 실제 하드웨어에 전송
+    strip1.write()  # 온도 LED 스트립 업데이트
+    strip2.write()  # 습도 LED 스트립 업데이트
+
+# ===== OLED 디스플레이 업데이트 함수 =====
+def update_oled():
+
+    # OLED가 초기화되지 않은 경우 함수 종료
+    if not oled:
+        return
+    
+    try:
+        # ===== 화면 지우기 및 기본 정보 표시 =====
+        oled.fill(0)  # 화면을 검은색으로 지우기
+        
+        # 첫 번째 줄: 온도 정보 표시 (소수점 1자리까지)
+        oled.text("T:{:.1f}C".format(temperature), 0, 0)
+        
+        # 두 번째 줄: 습도 정보 표시 (소수점 1자리까지)
+        oled.text("H:{:.1f}%".format(humidity), 0, 20)
+        
+        # 세 번째 줄: 기압 정보 표시 (정수로 표시)
+        oled.text("P:{:.0f}hPa".format(pressure), 0, 40)
+        
+        # ===== 센서 상태 표시 =====
+        # 화면 오른쪽에 현재 사용 중인 센서 종류 표시
+        if bme_sensor:
+            oled.text("BME280", 70, 0)  # 실제 BME280 센서 사용 중
+        else:
+            oled.text("DUMMY", 70, 0)   # 더미 데이터 사용 중
+        
+        # ===== 영하 온도 특별 경고 표시 =====
+        # 온도가 0도 미만일 경우 경고 메시지 표시
+        if temperature < 0:
+            oled.text("BELOW ZERO", 0, 50)  # 네 번째 줄에 영하 경고 표시
+            
+        # ===== 화면에 모든 내용 출력 =====
+        oled.show()  # 메모리의 내용을 실제 OLED 화면에 출력
+        
+    except Exception as e:
+        print("OLED update error:", e)  # OLED 업데이트 오류 메시지
+
+# ===== LED 유틸리티 함수들 =====
+def set_all_leds(r, g, b):
+    """
+    모든 LED를 지정된 RGB 색상으로 설정하는 함수
+    Args:
+        r (int): 빨간색 값 (0-255)
+        g (int): 초록색 값 (0-255) 
+        b (int): 파란색 값 (0-255)
+    """
+    # 첫 번째 LED 스트립의 모든 LED를 지정 색상으로 설정
+    if strip1:
+        for i in range(LED_COUNT):
+            strip1[i] = (r, g, b)  # 각 LED에 RGB 색상 설정
+        strip1.write()  # 하드웨어에 변경사항 적용
+        
+    # 두 번째 LED 스트립의 모든 LED를 지정 색상으로 설정
+    if strip2:
+        for i in range(LED_COUNT):
+            strip2[i] = (r, g, b)  # 각 LED에 RGB 색상 설정
+        strip2.write()  # 하드웨어에 변경사항 적용
+
+def clear_all_leds():
+    """
+    모든 LED를 끄는 함수 (검은색으로 설정)
+    LED 상태를 초기화하거나 이전 표시를 지울 때 사용
+    """
+    set_all_leds(0, 0, 0)  # 모든 LED를 (0,0,0) = 검은색으로 설정
+
+# ===== 웹 클라이언트 요청 처리 함수 =====
+def handle_client(client):
+    """
+    웹 브라우저나 API 클라이언트의 HTTP 요청을 처리하는 함수
+    - '/data' 경로: JSON 형태로 센서 데이터 반환 (API용)
+    - 기타 경로: HTML 웹페이지 반환 (브라우저용)
+    """
+    try:
+        # ===== HTTP 요청 읽기 =====
+        # 클라이언트로부터 HTTP 요청 데이터를 받아서 문자열로 디코딩
+        request = client.recv(1024).decode('utf-8')
+        
+        # ===== 요청 경로에 따른 분기 처리 =====
+        if '/data' in request:
+            # ===== JSON API 응답 처리 =====
+            # API 요청 시 센서 데이터를 JSON 형태로 반환
+            
+            # 센서 데이터를 딕셔너리로 구성
+            data = {
+                'temperature': round(temperature, 1),  # 온도 (소수점 1자리)
+                'humidity': round(humidity, 1),        # 습도 (소수점 1자리)
+                'pressure': round(pressure, 1),        # 기압 (소수점 1자리)
+                # 센서 상태 정보 (실제 센서 사용 여부)
+                'status': "BME280 Active" if (BME280_AVAILABLE and bme_sensor) else "Dummy Data"
+            }
+            
+            # HTTP 응답 헤더와 JSON 데이터를 결합하여 응답 생성
+            response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n" + json.dumps(data)
+            
+            # 클라이언트에게 JSON 응답 전송
+            client.send(response.encode('utf-8'))
+            
+        else:
+            # ===== HTML 웹페이지 응답 처리 =====
+            # 브라우저 요청 시 사용자 친화적인 웹페이지 반환
+            
+            # HTML 템플릿 문자열 (CSS 스타일 포함)
+            html = """HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n
+<!DOCTYPE html><html><head><title>Pico Weather</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8">
+<style>
+/* 전체 페이지 스타일 설정 */
+body{{font-family:Arial,sans-serif;text-align:center;margin:10px;padding:10px;background:#f5f5f5;}}
+.container{{max-width:300px;margin:0 auto;}}  /* 중앙 정렬된 컨테이너 */
+h1{{font-size:20px;margin-bottom:15px;color:#333;}}  /* 제목 스타일 */
+
+/* 데이터 표시 박스 스타일 */
+.data-box{{font-size:18px;margin:8px 0;padding:12px;border-radius:8px;color:white;width:100%;box-sizing:border-box;}}
+.temp{{background:#FF6B35;}}   /* 온도 박스: 주황색 배경 */
+.humi{{background:#3498DB;}}   /* 습도 박스: 파란색 배경 */
+.pres{{background:#9B59B6;}}   /* 기압 박스: 보라색 배경 */
+
+/* 상태 정보와 영하 온도 경고 스타일 */
+.status{{margin-top:15px;font-size:14px;color:#666;}}
+.below-zero{{color:red; font-weight:bold;}}  /* 영하 온도 경고: 빨간색 굵은 글씨 */
+</style></head>
 <body>
-    <div class="container">
-        <h1> ESP32 Weather Station</h1>     <!-- 제목과 날씨 이모지로 직관적 표현 -->
-        
-        <!-- 각 센서별로 색상이 다른 카드 형태로 데이터 표시 -->
-        <div class="sensor-card temp">         <!-- 온도 표시 카드 (주황색) -->
-            <div class="sensor-value" id="temp">--°C</div>     <!-- 온도 값 표시 영역 -->
-            <div class="sensor-label">온도</div>
-        </div>
-        
-        <div class="sensor-card humi">         <!-- 습도 표시 카드 (파란색) -->
-            <div class="sensor-value" id="humi">--%</div>      <!-- 습도 값 표시 영역 -->
-            <div class="sensor-label">습도</div>
-        </div>
-        
-        <div class="sensor-card pres">         <!-- 기압 표시 카드 (보라색) -->
-            <div class="sensor-value" id="pres">-- hPa</div>   <!-- 기압 값 표시 영역 -->
-            <div class="sensor-label">기압</div>
-        </div>
-        
-        <div class="update-time" id="time">데이터 로딩 중...</div> <!-- 마지막 업데이트 시간 표시 -->
-    </div>
-</body>
-</html>
-)";
+<div class="container">
+<h1>Pico Weather Station</h1>
 
-void setup() {
-    // ********* 시리얼 통신 초기화 *********
-    // 디버깅 및 상태 확인을 위한 시리얼 통신 설정
-    Serial.begin(115200);          // 높은 보드레이트로 빠른 디버깅 가능
-    delay(1000);                   // 시리얼 포트 안정화 대기
+<!-- 센서 데이터 표시 박스들 -->
+<!-- 온도 표시: 영하일 경우 경고 메시지 추가 -->
+<div class="data-box temp">Temp: {:.1f}°C {}</div>
+<!-- 습도 표시 -->
+<div class="data-box humi">Humi: {:.1f}%</div>  
+<!-- 기압 표시 -->
+<div class="data-box pres">Press: {:.0f}hPa</div>
+
+<!-- 센서 상태 정보 표시 -->
+<div class="status">{}</div>
+</div>
+
+<!-- 자동 새로고침 스크립트 (5초마다) -->
+<script>setTimeout(()=>location.reload(),5000);</script>
+</body></html>""".format(
+    temperature,  # 온도 값
+    # 영하 온도일 경우에만 경고 메시지 추가
+    "<span class='below-zero'>(Below Zero)</span>" if temperature < 0 else "",
+    humidity,     # 습도 값
+    pressure,     # 기압 값
+    # 센서 상태 메시지
+    "BME280 Active" if (BME280_AVAILABLE and bme_sensor) else "Dummy Data"
+)
+            
+            # 클라이언트에게 HTML 응답 전송
+            client.send(html.encode('utf-8'))
+                
+    except Exception as e:
+        print("Client handling error:", e)  # 클라이언트 처리 중 오류 발생 시 메시지 출력
+    finally:
+        # ===== 연결 종료 =====
+        # 오류가 발생하더라도 반드시 클라이언트 연결을 종료
+        try:
+            client.close()  # 클라이언트 소켓 연결 종료
+        except:
+            pass  # 연결 종료 중 오류가 발생해도 무시 (이미 종료된 경우 등)
+
+# ===== 메인 함수 (프로그램 진입점) =====
+def main():
+    """
+    프로그램의 메인 실행 함수
+    - 하드웨어 초기화
+    - WiFi 연결
+    - 웹서버 설정
+    - 메인 루프 실행 (센서 읽기, LED 업데이트, 웹 요청 처리)
+    """
+    global last_sensor_read  # 마지막 센서 읽기 시간 추적용 전역 변수
     
-    // ********* I2C 버스 초기화 *********
-    // BME280 센서와 OLED 디스플레이가 공통으로 사용할 I2C 버스 설정
-    Wire.begin(SDA_PIN, SCL_PIN);  // 커스텀 핀으로 I2C 초기화 (SDA=8, SCL=9)
+    print("Pico 2 W Weather Station starting")  # 프로그램 시작 메시지
     
-    // ********* OLED 디스플레이 초기화 *********
-    // 128x64 해상도의 SSD1306 OLED 초기화 및 에러 처리
-    if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) { // OLED 초기화 시도
-        setAllLEDs(255, 255, 0);   // OLED 오류시 노란색 LED로 시각적 알림
-        delay(2000);               // 2초간 오류 상태 표시
-    } else {
-        // OLED 초기화 성공시 화면 클리어 후 대기
-        display.clearDisplay();    // 초기화 완료 후 빈 화면으로 시작
-        display.display();         // 클리어된 상태를 실제 화면에 적용
-    }
+    # ===== 단계 1: 하드웨어 초기화 =====
+    # I2C, LED, 센서, OLED 등 모든 하드웨어 컴포넌트 초기화
+    init_hardware()
     
-    // ********* NeoPixel LED 스트립 초기화 *********
-    // 두 개의 LED 스트립 초기화 및 밝기 설정
-    strip1.begin();                // 온도용 스트립 초기화
-    strip2.begin();                // 습도용 스트립 초기화
-    strip1.setBrightness(BRIGHTNESS); // 밝기 설정 (전력 소모 조절)
-    strip2.setBrightness(BRIGHTNESS);
-    strip1.show();                 // 초기 상태 적용 (모든 LED OFF)
-    strip2.show();
+    # ===== 단계 2: WiFi 네트워크 연결 =====
+    # WiFi 연결 실패 시 시스템 재시작으로 재시도
+    if not connect_wifi():
+        print("WiFi connection failed! Retrying in 10 seconds...")
+        time.sleep(10)      # 10초 대기
+        machine.reset()     # 시스템 재시작으로 처음부터 다시 시도
     
-    // ********* BME280 센서 초기화 *********
-    // 온도/습도/기압 센서 초기화 및 통신 확인
-    if (!bme.begin(0x76)) {        // I2C 주소 0x76에서 BME280 찾기 (일부는 0x77)
-        // 센서 초기화 실패시 빨간색 LED로 에러 표시 후 프로그램 중단
-        setAllLEDs(255, 0, 0);     // 빨간색 = 심각한 하드웨어 오류
-        while (1) delay(1000);     // 무한루프로 프로그램 중단 (센서 없이는 동작 불가)
-    }
-    
-    // ********* WiFi 연결 초기화 *********
-    // WiFi 네트워크 연결 시도 및 타임아웃 처리
-    WiFi.begin(ssid, password);   // 설정된 WiFi 네트워크에 연결 시작
-    setAllLEDs(255, 255, 0);       // 연결 시도 중임을 노란색 LED로 표시
-    
-    // WiFi 연결 대기 (최대 20초 타임아웃)
-    int wifi_timeout = 0;          // 타임아웃 카운터
-    while (WiFi.status() != WL_CONNECTED && wifi_timeout < 20) { // 연결 상태 확인
-        delay(1000);               // 1초씩 대기
-        wifi_timeout++;            // 타임아웃 카운터 증가
-    }
-    
-    // ********* WiFi 연결 결과 처리 *********
-    if (WiFi.status() == WL_CONNECTED) { // WiFi 연결 성공
-        // 연결 성공 정보를 시리얼로 출력 (IP 주소 확인용)
-        Serial.println("");
-        Serial.println("WiFi 연결 성공!");
-        Serial.print("IP 주소: ");
-        Serial.println(WiFi.localIP()); // 할당받은 IP 주소 출력 (웹 접속용)
+    # ===== 단계 3: 웹서버 설정 =====
+    # HTTP 웹서버를 설정하여 브라우저와 API 요청을 처리할 수 있도록 준비
+    try:
+        # TCP 소켓 생성 및 설정
+        server_socket = socket.socket()  # TCP 소켓 생성
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # 주소 재사용 설정
+        server_socket.bind(('', 80))     # 모든 인터페이스의 80번 포트에 바인딩
+        server_socket.listen(1)          # 최대 1개의 대기 연결 허용
+        server_socket.settimeout(0.5)    # 0.5초 타임아웃 설정 (논블로킹 처리용)
         
-        setAllLEDs(0, 255, 0);     // 연결 성공을 초록색 LED로 표시
-        delay(3000);               // 3초간 성공 상태 표시
-        
-        server.begin();            // 웹서버 시작 (포트 80에서 대기)
-        
-    } else {                       // WiFi 연결 실패
-        setAllLEDs(255, 0, 0);     // 연결 실패를 빨간색 LED로 표시
-        while (1) delay(1000);     // WiFi 없이는 웹서버 기능 불가하므로 프로그램 중단
-    }
-}
+        # 웹서버 시작 완료 메시지 (접속 가능한 IP 주소 포함)
+        print("Web server started - http://{}".format(wlan.ifconfig()[0]))
+    except Exception as e:
+        print("Web server initialization failed:", e)  # 웹서버 초기화 실패 시 오류 메시지
+        return  # 웹서버 실패 시 프로그램 종료
+    
+    # ===== 단계 4: 메인 루프 시작 =====
+    # 센서 읽기 타이밍 초기화
+    last_sensor_read = time.ticks_ms()  # 현재 시간을 마지막 센서 읽기 시간으로 설정
+    
+    # 무한 루프: 센서 데이터 수집과 웹 요청 처리를 지속적으로 수행
+    while True:
+        try:
+            # ===== 센서 데이터 주기적 업데이트 =====
+            # 지정된 간격(5초)마다 센서 데이터를 읽고 디스플레이 업데이트
+            if time.ticks_diff(time.ticks_ms(), last_sensor_read) >= SENSOR_INTERVAL:
+                last_sensor_read = time.ticks_ms()  # 현재 시간으로 업데이트
+                
+                # 센서 데이터 읽기 및 출력 장치 업데이트 순서
+                read_sensors()    # BME280에서 온도/습도/기압 데이터 읽기
+                update_leds()     # LED 스트립 상태 업데이트 (색상, 개수)
+                update_oled()     # OLED 디스플레이 내용 업데이트
+                
+                # 콘솔에 현재 센서 데이터 출력 (디버깅 및 모니터링용)
+                print("Sensor data: T={:.1f}C, H={:.1f}%, P={:.0f}hPa".format(
+                    temperature, humidity, pressure))
+                
+                # 메모리 정리 (마이크로컨트롤러의 제한된 메모리 관리)
+                gc.collect()
+            
+            # ===== 웹 클라이언트 요청 처리 =====
+            # 웹 브라우저나 API 클라이언트의 연결 요청을 처리
+            try:
+                # 새로운 클라이언트 연결 수락 (논블로킹, 타임아웃 0.5초)
+                client, addr = server_socket.accept()
+                print("Client connected:", addr)  # 클라이언트 연결 정보 출력
+                
+                # 클라이언트 요청 처리 (HTML 또는 JSON 응답)
+                handle_client(client)
+                
+            except OSError:
+                # 타임아웃 발생은 정상적인 상황 (연결 요청이 없는 경우)
+                pass  # 타임아웃은 무시하고 계속 진행
+            except Exception as e:
+                print("Client accept error:", e)  # 기타 연결 오류 메시지 출력
+            
+            # ===== WiFi 연결 상태 모니터링 =====
+            # WiFi 연결이 끊어진 경우 자동 재연결 시도
+            if not wlan.isconnected():
+                print("WiFi connection lost. Attempting reconnection...")
+                if not connect_wifi():  # 재연결 시도
+                    print("Reconnection failed")  # 재연결 실패 메시지
+                    time.sleep(5)  # 5초 대기 후 다시 시도
+            
+            # ===== 루프 주기 조절 =====
+            # CPU 사용률을 낮추고 다른 작업에 시간을 할당하기 위한 짧은 대기
+            time.sleep(0.1)  # 100ms 대기
+            
+        except Exception as e:
+            # 메인 루프에서 예상치 못한 오류 발생 시 처리
+            print("Main loop error:", e)  # 오류 메시지 출력
+            time.sleep(1)  # 1초 대기 후 루프 계속 (시스템 안정성 확보)
 
-void loop() {
-    // ********* 비블로킹 타이머로 센서 읽기 주기 관리 *********
-    // delay() 사용 없이 millis()로 정확한 시간 간격 유지
-    unsigned long currentMillis = millis(); // 현재 시간 획득 (부팅 후 밀리초)
-    if (currentMillis - previousMillis >= interval) { // 설정된 간격(5초) 경과 확인
-        previousMillis = currentMillis;     // 다음 주기 계산을 위해 시간 업데이트
-        // 센서 데이터 처리 루틴 실행
-        readSensors();             // BME280에서 온도/습도/기압 읽기
-        updateLEDs();              // 센서 값에 따른 LED 색상/개수 업데이트
-        updateOLED();              // OLED 화면에 최신 센서 값 표시
-    }
-    
-    // ********* 웹서버 클라이언트 요청 처리 *********
-    // 새로운 HTTP 요청이 있는지 확인하고 처리
-    WiFiClient client = server.available(); // 대기 중인 클라이언트 연결 확인
-    if (client) {                  // 클라이언트가 연결된 경우
-        handleClient(client);      // HTTP 요청 파싱 및 응답 처리
-    }
-    
-    // ********* WiFi 연결 상태 모니터링 *********
-    // WiFi 연결이 끊어진 경우 자동 재연결 시도
-    if (WiFi.status() != WL_CONNECTED) { // WiFi 연결 상태 확인
-        setAllLEDs(255, 255, 0);   // 재연결 시도 중임을 노란색 LED로 표시
-        WiFi.reconnect();          // WiFi 재연결 시도
-        delay(5000);               // 5초 대기 후 다음 loop 실행
-    }
-}
 
-void readSensors() {               // BME280 센서에서 3가지 환경 데이터 읽기
-    // BME280은 온도, 습도, 기압을 동시에 측정 가능한 통합 센서
-    temperature = bme.readTemperature(); // 온도 읽기 (섭씨로 직접 출력)
-    humidity = bme.readHumidity();       // 상대습도 읽기 (% 단위)
-    pressure = bme.readPressure() / 100.0F; // 기압 읽기 (Pa를 hPa로 변환)
-}
-
-void updateLEDs() {                // 센서 값에 따른 LED 시각화 처리
-    // ********* 온도 LED 개수 계산 *********
-    // 온도의 절댓값을 이용하여 LED 개수 결정 (영하/영상 구분 없이)
-    float absTemp = fabs(temperature); // float 타입 절댓값 함수 사용
-    
-    int tempLEDs;                  // 켤 LED 개수 저장 변수
-    // 온도 구간별 LED 개수 설정 (8도씩 구간 분할)
-    if (absTemp <= 8) {            // 0-8도: 낮은 온도
-        tempLEDs = 1;
-    } else if (absTemp <= 16) {    // 9-16도: 보통 온도
-        tempLEDs = 2;
-    } else if (absTemp <= 24) {    // 17-24도: 적당한 온도
-        tempLEDs = 3;
-    } else if (absTemp <= 32) {    // 25-32도: 높은 온도
-        tempLEDs = 4;
-    } else {                       // 33도 이상: 매우 높은 온도
-        tempLEDs = 5;
-    }
-    
-    // ********* 습도 LED 개수 계산 *********
-    int humiLEDs;                  // 켤 LED 개수 저장 변수
-    // 습도 구간별 LED 개수 설정 (20%씩 구간 분할)
-    if (humidity <= 20) {          // 0-20%: 매우 건조
-        humiLEDs = 1;
-    } else if (humidity <= 40) {   // 21-40%: 건조
-        humiLEDs = 2;
-    } else if (humidity <= 60) {   // 41-60%: 적당함
-        humiLEDs = 3;
-    } else if (humidity <= 80) {   // 61-80%: 습함
-        humiLEDs = 4;
-    } else {                       // 81-100%: 매우 습함
-        humiLEDs = 5;
-    }
-    
-    // ********* 온도 LED 스트립 업데이트 *********
-    strip1.clear();                // 모든 LED를 먼저 끄기
-    for (int i = 0; i < tempLEDs; i++) { // 계산된 LED 개수만큼 반복
-        // 실제 온도값(절댓값 아님)에 따른 색상 결정
-        if (temperature < 0) {     // 영하 온도
-            strip1.setPixelColor(i, strip1.Color(255, 255, 255)); // 흰색 (얼음/서리)
-        } else if (temperature < 20) { // 0-19도
-            strip1.setPixelColor(i, strip1.Color(0, 100, 255)); // 파란색 (차가움)
-        } else if (temperature < 30) { // 20-29도
-            strip1.setPixelColor(i, strip1.Color(255, 165, 0)); // 주황색 (따뜻함)
-        } else {                   // 30도 이상
-            strip1.setPixelColor(i, strip1.Color(255, 0, 0)); // 빨간색 (더위)
-        }
-    }
-    strip1.show();                 // LED 변경사항을 실제 하드웨어에 적용
-    
-    // ********* 습도 LED 스트립 업데이트 *********
-    strip2.clear();                // 모든 LED를 먼저 끄기
-    for (int i = 0; i < humiLEDs; i++) { // 계산된 LED 개수만큼 반복
-        // 습도는 모든 구간에서 동일한 파란색 사용
-        strip2.setPixelColor(i, strip2.Color(0, 150, 255)); // 파란색 (물/습기)
-    }
-    strip2.show();                 // LED 변경사항을 실제 하드웨어에 적용
-}
-
-void updateOLED() {                // OLED 화면에 센서 값 표시
-    display.clearDisplay();        // 이전 내용 지우기
-    display.setTextColor(SSD1306_WHITE); // 흰색 텍스트 설정
-    
-    // ********* 온도 표시 *********
-    display.setTextSize(2);        // 큰 글자 크기 (2배)
-    display.setCursor(0, 0);       // 화면 최상단 좌측에서 시작
-    display.print(temperature, 1); // 소수점 1자리로 온도 출력
-    display.println("C");          // 섭씨 단위 표시
-    
-    // ********* 습도 표시 *********
-    display.setTextSize(2);        // 큰 글자 크기 유지
-    display.print(humidity, 1);    // 소수점 1자리로 습도 출력
-    display.println("%");          // 퍼센트 단위 표시
-    
-    // ********* 기압 표시 *********
-    display.setTextSize(2);        // 큰 글자 크기 유지
-    display.print(pressure, 0);    // 정수로 기압 출력 (화면 공간 절약)
-    display.println("hPa");        // hPa 단위 표시
-    
-    display.display();             // 화면 버퍼의 내용을 실제 OLED에 출력
-}
-
-void setAllLEDs(int r, int g, int b) { // 모든 LED를 동일한 색상으로 설정하는 유틸리티 함수
-    // 시스템 상태 표시용 (초기화, 오류, 연결 상태 등)
-    for (int i = 0; i < LED_COUNT; i++) { // 각 스트립의 모든 LED에 대해
-        strip1.setPixelColor(i, strip1.Color(r, g, b)); // 온도 스트립 LED 색상 설정
-        strip2.setPixelColor(i, strip2.Color(r, g, b)); // 습도 스트립 LED 색상 설정
-    }
-    strip1.show();                 // 온도 스트립 변경사항 적용
-    strip2.show();                 // 습도 스트립 변경사항 적용
-}
-
-void handleClient(WiFiClient client) { // 웹 클라이언트의 HTTP 요청 처리
-    String request = "";           // HTTP 요청 헤더 저장 변수
-    
-    // ********* HTTP 요청 헤더 읽기 *********
-    while (client.connected() && client.available()) { // 클라이언트가 연결되고 데이터가 있는 동안
-        String line = client.readStringUntil('\n');    // 한 줄씩 읽기
-        if (line.length() == 1 && line[0] == '\r') break; // 빈 줄 만나면 헤더 끝
-        if (request.length() == 0) request = line;      // 첫 번째 줄을 요청으로 저장 (GET /path HTTP/1.1)
-    }
-    
-    // ********* 요청 경로에 따른 응답 분기 *********
-    if (request.indexOf("GET /data") >= 0) { // AJAX 요청 (/data 경로)
-        // 센서 데이터를 CSV 형태로 응답
-        String data = String(temperature, 1) + "," +    // 온도 (소수점 1자리)
-                      String(humidity, 1) + "," +       // 습도 (소수점 1자리)
-                      String(pressure, 1);              // 기압 (소수점 1자리)
-        
-        // HTTP 응답 헤더 전송
-        client.println("HTTP/1.1 200 OK");              // 성공 응답
-        client.println("Content-Type: text/plain");     // 일반 텍스트 응답
-        client.println("Connection: close");            // 응답 후 연결 종료
-        client.println();                               // 헤더와 본문 구분하는 빈 줄
-        client.println(data);                           // 센서 데이터 전송
-        
-    } else {                       // 메인 페이지 요청 (기본 경로)
-        // HTML 웹페이지 응답
-        client.println("HTTP/1.1 200 OK");              // 성공 응답
-        client.println("Content-Type: text/html; charset=UTF-8"); // HTML 응답, UTF-8 인코딩
-        client.println("Connection: close");            // 응답 후 연결 종료
-        client.println();                               // 헤더와 본문 구분하는 빈 줄
-        client.println(htmlPage);                       // HTML 페이지 전송
-    }
-    
-    client.stop();                 // 클라이언트 연결 종료
-}
+if __name__ == "__main__":
+    main()  # 메인 함수 실행으로 프로그램 시작
