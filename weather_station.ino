@@ -1,4 +1,4 @@
-// 필요한 라이브러리 로드
+// IOT DASH BOARD 필요한 라이브러리 로드
 #include <WiFi.h>
 #include "SD.h"
 #include "DHT.h"
