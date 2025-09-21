@@ -8,7 +8,7 @@
 
 // 네트워크 자격 증명으로 대체
 const char* ssid     = "WeVO_2.4G"; // 공유기 ID입력
-const char* password = "Toolbox,WEVO8358+"; // 공유기 비밀번호 입력
+const char* password = "WEVO8358"; // 공유기 비밀번호 입력
 
 // 사용 중인 DHT 센서 유형에 대해 정의
 #define DHTTYPE DHT22   // DHT 22  
